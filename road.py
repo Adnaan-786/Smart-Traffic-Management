@@ -76,10 +76,13 @@ class Road:
         self._store_count(vehicle_count, capacity, total_time)
         self._update_emergency()
 
-    def cam_update(self, detected_count):
+    def cam_update(self, detected_count, emergency=None):
         """
         Updates the road from a camera reading instead of the density
         simulation. The vehicle count becomes what YOLO saw in that frame.
+
+        When emergency is given, it is a real detection from the emergency
+        model and replaces the random trigger entirely.
         """
         capacity = database.get_capacity(self.id)
         total_time = database.get_total_time(self.id)
@@ -87,7 +90,11 @@ class Road:
         vehicle_count = max(0, min(detected_count, capacity))
 
         self._store_count(vehicle_count, capacity, total_time)
-        self._update_emergency()
+
+        if emergency is None:
+            self._update_emergency()
+        else:
+            database.update_hasEmergencyVehicle(self.id, bool(emergency))
 
     def _store_count(self, vehicle_count, capacity, total_time):
         """Persists the vehicle count and the green time implied by it."""

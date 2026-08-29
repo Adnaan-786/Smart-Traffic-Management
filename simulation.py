@@ -50,12 +50,17 @@ class TrafficController:
                 database.update_total_time(road.id, VIDEO_TOTAL_TIME)
 
         self.feeds = []
+        self.watcher = None
         if use_video:
             import detection
             self.feeds = [
                 detection.VideoFeed(path, settings[0]).start()
                 for path, settings in zip(FEED_PATHS, ROAD_SETTINGS)
             ]
+            # One shared watcher looks for emergency vehicles across all feeds,
+            # but only when a model has been configured for it
+            if detection.EMERGENCY_MODEL_PATH:
+                self.watcher = detection.EmergencyWatcher(self.feeds).start()
         # Link the roads into a ring so each one knows its successor
         for current, following in zip(self.roads, self.roads[1:] + self.roads[:1]):
             current.next = following
@@ -128,7 +133,12 @@ class TrafficController:
                     # decision and the dashboard, so the two never disagree.
                     reading = self.feeds[index].snapshot()
                     self._feed_snapshots[index] = reading
-                    road.cam_update(reading["vehicle_count"])
+                    road.cam_update(
+                        reading["vehicle_count"],
+                        # None keeps the simulated trigger; a real value only
+                        # comes from a configured emergency model
+                        emergency=reading["emergency"] if self.watcher else None,
+                    )
                 else:
                     road.update()
             self.road_timestamp = curr_time
@@ -139,11 +149,13 @@ class TrafficController:
     def _refresh_snapshot(self):
         """Stores a plain-dict view of the current state for other threads to read."""
         feeds = self._feed_snapshots
+        watcher = self.watcher.status() if self.watcher else None
         state = {
             "active_road": self.active_road.get_name(),
             "elapsed": round(time.time() - self.start_time, 1),
             "green_time": round(self.active_road.get_green_time() or 0, 1),
             "use_video": self.use_video,
+            "watcher": watcher,
             "roads": [
                 {
                     "name": road.get_name(),
@@ -152,6 +164,8 @@ class TrafficController:
                     "green_time": round(road.get_green_time() or 0, 1),
                     "is_green": road.is_green,
                     "emergency": bool(road.get_hasEmergencyVehicle()),
+                    "emergency_label": (feeds[index].get("emergency_label")
+                                        if index < len(feeds) else None),
                     "feed": feeds[index] if index < len(feeds) else None,
                 }
                 for index, road in enumerate(self.roads)

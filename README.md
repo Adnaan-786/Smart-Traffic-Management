@@ -83,8 +83,10 @@ footage cannot react to our signals, so the feeds alone show the counts
 changing but never show the control doing anything. The simulation closes that
 loop: queue length on each approach tracks that camera's detected count,
 vehicles hold at the stop line while their signal is red, and pull away once it
-turns green. When a road is prioritised for an emergency, its lead vehicle is
-highlighted and gets waved through ahead of the cycle.
+turns green. Each vehicle picks a turn on arrival, roughly 60% straight, 22%
+right and 18% left, and follows its own curved path through the junction into
+the matching outbound lane. When a road is prioritised for an emergency, its
+lead vehicle is highlighted and gets waved through ahead of the cycle.
 
 The server stays the authority. It decides which road holds green and reports
 what each camera detects; the canvas only draws the consequences. Vehicle
@@ -96,10 +98,37 @@ without adding server load.
 The bundled `yolo11n.pt` is COCO-trained, and COCO has no ambulance, fire
 truck or police class, so emergency vehicles cannot be recognised from these
 feeds. The original code searched for `"cops"`, `"ambulance"` and
-`"fire truck"`, none of which the model can ever return. Emergency events
-therefore stay on the original random trigger and are labelled as simulated
-in the dashboard. Genuine detection would need a model trained on those
-classes.
+`"fire truck"`, none of which the model can ever return.
+
+The plumbing for a real detector is in place. `EmergencyWatcher` in
+`detection.py` runs a second model across all feeds from one worker, on the
+GPU where available, and feeds genuine detections straight into the signal
+logic in place of the random trigger. Point it at a model to switch it on:
+
+```bash
+EMERGENCY_MODEL=path/to/weights.pt EMERGENCY_CONF=0.6 python3 app.py
+```
+
+Adjust `EMERGENCY_CLASSES` in `detection.py` to the class ids that model uses
+for emergency vehicles. On an M2 the watcher runs at roughly 35-90ms per
+check on the GPU, against about 880ms on CPU, so a GPU is worth having.
+
+It ships disabled because none of the public models tested were trustworthy.
+Each was measured over about 40 frames per clip, comparing peak confidence on
+ordinary traffic against peak confidence on real ambulance footage:
+
+| Model | Peak on normal traffic | Peak on ambulance footage | Usable? |
+|-------|-----------------------|---------------------------|---------|
+| `udithhh/Emergency_Vehicle_Classification` | 0.465 (`Police`, on plain cars) | 0.30 | No, false alarms outrank real ones |
+| `kishornayak2006/IntelliSignal-YOLOv8-Ambulance` | 0.745, firing on 10 of 11 frames | 0.537 | No, calls every car an ambulance |
+| `sakethGurram/emergency-yolo` | 0.878 | 0.744 | No, no threshold separates them |
+
+In every case ordinary cars scored at least as high as genuine ambulances, so
+no confidence threshold separates them. A detector that is confidently wrong
+is worse than an honest simulation, which is why the random trigger stays the
+default and is labelled as simulated in the dashboard. A model trained and
+validated on wide traffic-camera scenes, rather than cropped single-vehicle
+images, would drop straight into the same hook.
 
 ## Deploying to Render
 

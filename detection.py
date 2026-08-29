@@ -10,6 +10,7 @@ or police class, so emergency vehicles cannot be detected from video with this
 model. Emergency events stay simulated; see Road.update().
 """
 
+import os
 import threading
 import time
 
@@ -31,6 +32,16 @@ MODEL_PATH = "yolo11n.pt"
 INFERENCE_SIZE = 640      # Frames are scaled to this before detection
 CONFIDENCE = 0.35         # Minimum detection confidence
 TARGET_FPS = 8            # Detections per second per feed
+
+# A second model can handle emergency vehicles, which COCO cannot represent.
+# Off unless EMERGENCY_MODEL points at a weights file: see the README for why
+# no public model tested here was trustworthy enough to enable by default.
+# EMERGENCY_CLASSES lists the class ids in that model to treat as emergencies.
+EMERGENCY_MODEL_PATH = os.environ.get("EMERGENCY_MODEL", "")
+EMERGENCY_CLASSES = {0: "Emergency"}
+EMERGENCY_CONFIDENCE = float(os.environ.get("EMERGENCY_CONF", "0.6"))
+EMERGENCY_INTERVAL = 0.35  # Seconds between checks, cycling through the feeds
+EMERGENCY_HOLD = 4.0       # Keep a sighting active this long after it is last seen
 
 # Model loading is serialised, but each feed gets its own model instance.
 # Ultralytics keeps per-call state on a shared predictor, so one model driven
@@ -60,6 +71,13 @@ class VideoFeed:
         self.class_counts = {}
         self.fps = 0.0
         self.error = None
+
+        # Set by the emergency worker, not by this feed's own thread
+        self.emergency = False
+        self.emergency_label = None
+        self.emergency_conf = 0.0
+        self._emergency_seen_at = None
+        self._raw_frame = None
 
         self._jpeg = None
         self._lock = threading.Lock()
@@ -124,6 +142,7 @@ class VideoFeed:
             last_frame_at = now
 
             with self._lock:
+                self._raw_frame = frame
                 self.vehicle_count = sum(counts.values())
                 self.class_counts = counts
                 self.fps = len(recent) / sum(recent) if sum(recent) else 0.0
@@ -144,6 +163,30 @@ class VideoFeed:
         with self._lock:
             return self._jpeg
 
+    def latest_frame(self):
+        """Returns the most recent undecorated frame, for the emergency worker."""
+        with self._lock:
+            return self._raw_frame
+
+    def set_emergency(self, label, conf):
+        """
+        Records an emergency sighting. Called by the emergency worker.
+        Passing None clears it, but only once the hold time has elapsed, so a
+        vehicle that flickers between frames does not flicker on the dashboard.
+        """
+        now = time.time()
+        with self._lock:
+            if label:
+                self.emergency = True
+                self.emergency_label = label
+                self.emergency_conf = conf
+                self._emergency_seen_at = now
+            elif self._emergency_seen_at and now - self._emergency_seen_at > EMERGENCY_HOLD:
+                self.emergency = False
+                self.emergency_label = None
+                self.emergency_conf = 0.0
+                self._emergency_seen_at = None
+
     def snapshot(self):
         """Returns the current detection numbers for this feed."""
         with self._lock:
@@ -153,4 +196,104 @@ class VideoFeed:
                 "class_counts": dict(self.class_counts),
                 "fps": round(self.fps, 1),
                 "error": self.error,
+                "emergency": self.emergency,
+                "emergency_label": self.emergency_label,
+                "emergency_conf": round(self.emergency_conf, 2),
             }
+
+
+class EmergencyWatcher:
+    """
+    Watches every feed for emergency vehicles using a single shared model.
+
+    The emergency model is roughly ten times heavier than the vehicle counter,
+    so one worker cycles through the feeds rather than each feed running its
+    own copy. On Apple silicon it runs on the GPU, which is about twelve times
+    faster than CPU and makes the whole thing practical.
+    """
+
+    def __init__(self, feeds):
+        self.feeds = feeds
+        self.device = None
+        self.error = None
+        self.latency_ms = 0.0
+        self._running = False
+
+    @staticmethod
+    def pick_device():
+        """Returns the fastest device available for the emergency model."""
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                return "mps"
+            if torch.cuda.is_available():
+                return "cuda"
+        except Exception:
+            pass
+        return "cpu"
+
+    def start(self):
+        """Begins watching on a background thread."""
+        if self._running:
+            return self
+        self._running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+        return self
+
+    def stop(self):
+        self._running = False
+
+    def _loop(self):
+        try:
+            from ultralytics import YOLO
+            model = YOLO(EMERGENCY_MODEL_PATH)
+            self.device = self.pick_device()
+            model.predict(np.zeros((64, 64, 3), dtype=np.uint8),
+                          device=self.device, verbose=False)
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            self._running = False
+            return
+
+        index = 0
+        while self._running:
+            started = time.time()
+            feed = self.feeds[index % len(self.feeds)]
+            index += 1
+
+            frame = feed.latest_frame()
+            if frame is None:
+                time.sleep(EMERGENCY_INTERVAL)
+                continue
+
+            try:
+                result = model.predict(
+                    frame,
+                    imgsz=INFERENCE_SIZE,
+                    conf=EMERGENCY_CONFIDENCE,
+                    classes=list(EMERGENCY_CLASSES),
+                    device=self.device,
+                    verbose=False,
+                )[0]
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+                time.sleep(1.0)
+                continue
+
+            # Keep the most confident sighting in this frame
+            best, best_conf = None, 0.0
+            for cls_id, conf in zip(result.boxes.cls.tolist(), result.boxes.conf.tolist()):
+                if conf > best_conf:
+                    best, best_conf = EMERGENCY_CLASSES.get(int(cls_id)), conf
+            feed.set_emergency(best, best_conf)
+
+            self.latency_ms = (time.time() - started) * 1000
+            time.sleep(max(0.0, EMERGENCY_INTERVAL - (time.time() - started)))
+
+    def status(self):
+        """Returns how the watcher is running, for the dashboard."""
+        return {
+            "device": self.device,
+            "latency_ms": round(self.latency_ms),
+            "error": self.error,
+        }
