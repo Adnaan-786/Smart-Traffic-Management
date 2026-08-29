@@ -17,6 +17,7 @@ road4.next = road1
 
 roads = [road1, road2, road3, road4]
 active_road = road1
+active_road.turn_green()  # Start the cycle with the first road already green
 start_time = time.time()
 
 road_timestamp = None
@@ -44,8 +45,9 @@ while True:
     # Check for emergency vehicles and prioritize the road if any is found
     for road in roads:
         if road.get_hasEmergencyVehicle():
-            print(f"Emergency vehicle detected on {road.get_name()}, prioritizing this road.")
+            # Only act (and report) if this road isn't already the one holding green
             if active_road != road:
+                print(f"Emergency vehicle detected on {road.get_name()}, prioritizing this road.")
                 active_road.turn_red()
                 active_road = road
                 active_road.turn_green()
@@ -82,4 +84,5 @@ while True:
             print(f"Road {road.get_name()} - Camera updated.")
         camera_timestamp = curr_time
 
-
+    # Brief pause so the loop doesn't spin the CPU at full speed
+    time.sleep(0.05)
