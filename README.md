@@ -75,6 +75,22 @@ Each feed gets its own model instance. Ultralytics keeps per-call state on a
 shared predictor and fuses the model in place on first use, so driving one
 model from several threads crashes.
 
+## Intersection simulation
+
+Below the camera feeds the dashboard draws a top-down view of the junction, in
+the spirit of [A/B Street](https://github.com/a-b-street/abstreet). Recorded
+footage cannot react to our signals, so the feeds alone show the counts
+changing but never show the control doing anything. The simulation closes that
+loop: queue length on each approach tracks that camera's detected count,
+vehicles hold at the stop line while their signal is red, and pull away once it
+turns green. When a road is prioritised for an emergency, its lead vehicle is
+highlighted and gets waved through ahead of the cycle.
+
+The server stays the authority. It decides which road holds green and reports
+what each camera detects; the canvas only draws the consequences. Vehicle
+motion is a car-following model in the browser, so the animation stays smooth
+without adding server load.
+
 ### Emergency vehicles are simulated
 
 The bundled `yolo11n.pt` is COCO-trained, and COCO has no ambulance, fire

@@ -81,6 +81,22 @@
   .road.green .bar span { background: var(--green); }
   .road.emergency .bar span { background: var(--amber); }
 
+  .simwrap {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; display: flex; justify-content: center;
+  }
+  #sim { width: 100%; max-width: 560px; aspect-ratio: 1; display: block; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+    margin-top: 10px; font-size: 12.5px; color: var(--muted);
+  }
+  .legend span { display: flex; align-items: center; gap: 7px; }
+  .legend i { width: 16px; height: 10px; border-radius: 2px; display: inline-block; }
+  .legend .sw-q { background: #6b7683; }
+  .legend .sw-m { background: #58a6ff; }
+  .legend .sw-e { background: #f0b849; }
+  .legend .legend-note { color: var(--muted); opacity: .85; }
+
   h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 30px 0 10px; }
   .log { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 6px 0; max-height: 240px; overflow-y: auto; }
   .log p { margin: 0; padding: 7px 18px; font-size: 13.5px; display: flex; gap: 12px; }
@@ -113,6 +129,17 @@
 
   <div class="grid" id="grid"></div>
 
+  <h2>Intersection simulation</h2>
+  <div class="simwrap">
+    <canvas id="sim"></canvas>
+  </div>
+  <div class="legend">
+    <span><i class="sw-q"></i> queued vehicle</span>
+    <span><i class="sw-m"></i> moving</span>
+    <span><i class="sw-e"></i> emergency vehicle</span>
+    <span class="legend-note">Queue length on each approach tracks that camera's detected vehicle count.</span>
+  </div>
+
   <h2>Event log</h2>
   <div class="log" id="log"><p class="empty">Waiting for events&hellip;</p></div>
 
@@ -129,6 +156,7 @@
 const grid = document.getElementById('grid');
 const log = document.getElementById('log');
 let built = false;
+let latestState = null;   // newest server state, read by the simulation loop
 
 // The MJPEG <img> elements must not be re-created on every poll, or each
 // refresh would restart the stream. Build the cards once, then update text.
@@ -158,6 +186,7 @@ function build(state) {
 }
 
 function render(state) {
+  latestState = state;
   document.getElementById('active').textContent = state.active_road;
   document.getElementById('elapsed').textContent = state.elapsed.toFixed(1) + 's';
   document.getElementById('phase').textContent = state.green_time.toFixed(1) + 's';
@@ -199,6 +228,228 @@ async function poll() {
 }
 poll();
 setInterval(poll, 500);
+
+// ---------------------------------------------------------------------------
+// Top-down intersection simulation.
+//
+// The server owns the decisions: which road holds green, and how many vehicles
+// each camera detects. This draws what those decisions look like on the road.
+// Queue length on an approach tracks its detected count, and vehicles only
+// cross once their own signal is green, so the effect of the controller's
+// choices is visible rather than implied.
+// ---------------------------------------------------------------------------
+const Sim = (() => {
+  const canvas = document.getElementById('sim');
+  const ctx = canvas.getContext('2d');
+
+  const SIZE = 640;                 // logical drawing space, scaled to the element
+  const C = SIZE / 2;
+  const ROAD = 132;                 // full width of a two-way road
+  const HALF = ROAD / 2;
+  const LANE = ROAD / 4;            // lane centre offset from the road centre
+  const STOP_LOW = C - HALF;
+  const STOP_HIGH = C + HALF;
+
+  const CAR_LEN = 26, CAR_W = 14, GAP = 9;
+  const CRUISE = 132;               // logical units per second
+  const ACCEL = 260, BRAKE = 420;
+  const STOP_DIST = STOP_LOW + 30;  // distance from spawn to the stop line
+  const END_DIST = SIZE + 60;
+  const MAX_QUEUE = 7;              // vehicles an approach can hold before the line
+
+  // One approach per road, in the order the server reports them. Vehicles drive
+  // on the right, which fixes each inbound lane to one side of its road.
+  const APPROACHES = [
+    // label position sits in the quadrant beside the road, clear of the lanes
+    { label: 'N', axis: 'y', dir:  1, lane: C - LANE, lx: C - HALF - 34, ly: 26 },
+    { label: 'E', axis: 'x', dir: -1, lane: C - LANE, lx: SIZE - 34, ly: C - HALF - 18 },
+    { label: 'S', axis: 'y', dir: -1, lane: C + LANE, lx: C + HALF + 34, ly: SIZE - 26 },
+    { label: 'W', axis: 'x', dir:  1, lane: C + LANE, lx: 34, ly: C + HALF + 18 },
+  ].map(a => ({ ...a, start: a.dir > 0 ? -30 : SIZE + 30, cars: [], nextId: 0 }));
+
+  const CAR_COLORS = ['#58a6ff', '#7c8b9a', '#8b949e', '#6e7f95', '#89a7c4'];
+  let last = 0;
+
+  // Only resize when the element actually changes size. Assigning
+  // canvas.width reallocates the backing store and clears the canvas, so
+  // doing it every frame stalls the renderer.
+  let needsResize = true;
+  new ResizeObserver(() => { needsResize = true; }).observe(canvas);
+
+  function resize() {
+    if (!needsResize) return;
+    needsResize = false;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+  }
+
+  // Position along the approach, in canvas coordinates
+  function coord(app, d) { return app.start + d * app.dir; }
+
+  function target(road, useVideo) {
+    // In camera mode the count is roughly what one frame shows, so it maps to
+    // the queue directly. The density simulation counts a whole road, so scale.
+    const n = useVideo
+      ? road.vehicle_count
+      : Math.round((road.vehicle_count / road.capacity) * MAX_QUEUE);
+    return Math.max(0, Math.min(MAX_QUEUE, n));
+  }
+
+  function step(state, dt) {
+    state.roads.forEach((road, i) => {
+      const app = APPROACHES[i];
+      const green = road.is_green;
+
+      // Retire anything that has driven off the far side
+      app.cars = app.cars.filter(c => c.d < END_DIST);
+
+      // Top the queue up towards what the camera sees
+      const waiting = app.cars.filter(c => c.d < STOP_DIST).length;
+      const rearmost = app.cars.reduce((m, c) => Math.min(m, c.d), Infinity);
+      if (waiting < target(road, state.use_video) && rearmost > CAR_LEN + GAP) {
+        app.cars.push({
+          id: app.nextId++,
+          d: 0,
+          v: CRUISE * 0.6,
+          color: CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)],
+          emergency: false,
+        });
+      }
+
+      // The emergency vehicle is whichever car is closest to the stop line
+      const queued = app.cars.filter(c => c.d < STOP_DIST).sort((a, b) => b.d - a.d);
+      app.cars.forEach(c => { c.emergency = false; });
+      if (road.emergency && queued.length) queued[0].emergency = true;
+
+      // Leaders first, so each car can see the one in front of it
+      const order = [...app.cars].sort((a, b) => b.d - a.d);
+      order.forEach((car, idx) => {
+        let limit = Infinity;
+
+        const ahead = order[idx - 1];
+        if (ahead) limit = ahead.d - (CAR_LEN + GAP);
+
+        // A red light only holds back cars that have not yet entered the box
+        if (!green && car.d <= STOP_DIST) limit = Math.min(limit, STOP_DIST);
+
+        const room = limit - car.d;
+        // Ease off when there is little room left, otherwise get up to speed
+        const wanted = room <= 0 ? 0 : Math.min(CRUISE, Math.sqrt(2 * BRAKE * room));
+        car.v += Math.sign(wanted - car.v) * (wanted > car.v ? ACCEL : BRAKE) * dt;
+        car.v = Math.max(0, Math.min(car.v, CRUISE));
+        car.d = Math.min(car.d + car.v * dt, Math.max(car.d, limit));
+      });
+    });
+  }
+
+  function drawRoads() {
+    ctx.fillStyle = '#0b0f14';
+    ctx.fillRect(0, 0, SIZE, SIZE);
+
+    // Asphalt: one vertical strip, one horizontal strip
+    ctx.fillStyle = '#1c222b';
+    ctx.fillRect(C - HALF, 0, ROAD, SIZE);
+    ctx.fillRect(0, C - HALF, SIZE, ROAD);
+
+    // Centre lines, broken where the intersection box is
+    ctx.strokeStyle = '#3b444f';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([14, 12]);
+    ctx.beginPath();
+    ctx.moveTo(C, 0); ctx.lineTo(C, STOP_LOW);
+    ctx.moveTo(C, STOP_HIGH); ctx.lineTo(C, SIZE);
+    ctx.moveTo(0, C); ctx.lineTo(STOP_LOW, C);
+    ctx.moveTo(STOP_HIGH, C); ctx.lineTo(SIZE, C);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Clear the junction so the dashes do not run through it
+    ctx.fillStyle = '#20272f';
+    ctx.fillRect(STOP_LOW, STOP_LOW, ROAD, ROAD);
+  }
+
+  function drawStopLines(state) {
+    state.roads.forEach((road, i) => {
+      const app = APPROACHES[i];
+      const at = coord(app, STOP_DIST);
+      ctx.strokeStyle = road.is_green ? 'rgba(46,160,67,.85)' : 'rgba(207,60,51,.85)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      if (app.axis === 'y') {
+        ctx.moveTo(app.lane - LANE, at); ctx.lineTo(app.lane + LANE, at);
+      } else {
+        ctx.moveTo(at, app.lane - LANE); ctx.lineTo(at, app.lane + LANE);
+      }
+      ctx.stroke();
+
+      // Signal head, set just outside the lane
+      const off = LANE + 16;
+      const sx = app.axis === 'y' ? app.lane - (app.dir > 0 ? off : -off) : at + (app.dir > 0 ? -off : off);
+      const sy = app.axis === 'y' ? at + (app.dir > 0 ? -off : off) : app.lane - (app.dir > 0 ? -off : off);
+      ctx.beginPath();
+      ctx.arc(sx, sy, 7, 0, Math.PI * 2);
+      ctx.fillStyle = road.is_green ? '#2ea043' : '#cf3c33';
+      ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 12;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Road label
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(road.name, app.lx, app.ly);
+    });
+  }
+
+  function drawCars(flash) {
+    APPROACHES.forEach(app => {
+      app.cars.forEach(car => {
+        const along = coord(app, car.d);
+        const x = app.axis === 'y' ? app.lane : along;
+        const y = app.axis === 'y' ? along : app.lane;
+        const w = app.axis === 'y' ? CAR_W : CAR_LEN;
+        const h = app.axis === 'y' ? CAR_LEN : CAR_W;
+
+        if (car.emergency) {
+          ctx.fillStyle = flash ? '#f0b849' : '#f5f5f5';
+          ctx.shadowColor = '#f0b849';
+          ctx.shadowBlur = 16;
+        } else {
+          // Dim the ones that are sitting still, so queues read at a glance
+          ctx.fillStyle = car.v < 6 ? '#6b7683' : car.color;
+        }
+        ctx.beginPath();
+        ctx.roundRect(x - w / 2, y - h / 2, w, h, 3);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      });
+    });
+  }
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const state = latestState;
+    if (!state) return;
+
+    const dt = Math.min(0.05, (now - last) / 1000 || 0);
+    last = now;
+
+    resize();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(canvas.width / SIZE, canvas.height / SIZE);
+
+    step(state, dt);
+    drawRoads();
+    drawStopLines(state);
+    drawCars(Math.floor(now / 250) % 2 === 0);
+  }
+
+  return { start() { requestAnimationFrame(frame); } };
+})();
+Sim.start();
 </script>
 </body>
 </html>
