@@ -1,0 +1,6 @@
+# Core simulation (main.py)
+numpy
+
+# Camera-based detection (detection.py / Road.cam_update)
+ultralytics
+opencv-python
