@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: smart-traffic-management
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # One worker only: each worker would otherwise run its own copy of the
+    # simulation, and requests would see inconsistent state.
+    startCommand: gunicorn app:app --workers 1 --threads 4 --bind 0.0.0.0:$PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7

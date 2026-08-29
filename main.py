@@ -1,88 +1,44 @@
+"""
+Console runner for the traffic controller.
+
+Prints a status block every second showing vehicle counts and light states.
+For the web dashboard, run app.py instead.
+"""
+
 import time
-from road import Road
-import database
 
-database.create_database()  # Ensure the database is initialized
+import simulation
 
-# Initialize roads and link them
-road1 = Road("Road 1", 40, 1000, 300, 1)
-road2 = Road("Road 2", 60, 800, 300, 2)
-road3 = Road("Road 3", 70, 1100, 300, 1.7)
-road4 = Road("Road 4", 30, 700, 300, 1.2)
+controller = simulation.TrafficController()
+status_timestamp = time.time()
 
-road1.next = road2
-road2.next = road3
-road3.next = road4
-road4.next = road1
+try:
+    while True:
+        # Advance the simulation and report anything that happened
+        for message in controller.step():
+            print(message)
 
-roads = [road1, road2, road3, road4]
-active_road = road1
-active_road.turn_green()  # Start the cycle with the first road already green
-start_time = time.time()
+        curr_time = time.time()
 
-road_timestamp = None
-camera_timestamp = None
+        # Print a full status block once a second
+        if curr_time - status_timestamp > 1:
+            state = controller.get_state()
 
+            print("\nUpdating vehicle counts:")
+            for road in state["roads"]:
+                print(f"Road {road['name']} - Vehicle count: {road['vehicle_count']}")
 
-while True:
-    curr_time = time.time()
+            print(f"Active road: {state['active_road']}")
+            print(f"Time since last switch: {state['elapsed']:.2f} seconds")
+            print("Road statuses:")
+            for road in state["roads"]:
+                print(f"  {road['name']} - Green: {road['is_green']}, Emergency: {road['emergency']}")
 
-    # Initializing timestamps if they're None
-    if road_timestamp is None:
-        road_timestamp = curr_time
+            print("\n----------------------------------------------")
+            status_timestamp = curr_time
 
-    if camera_timestamp is None:
-        camera_timestamp = curr_time
+        # Brief pause so the loop doesn't spin the CPU at full speed
+        time.sleep(0.05)
 
-    # Check if green time has passed, switch active road if necessary
-    if curr_time - start_time > active_road.get_green_time():
-        print(f"Switching green light from {active_road.get_name()} to {active_road.next.get_name()}")
-        active_road.turn_red()
-        active_road = active_road.next
-        active_road.turn_green()
-        start_time = curr_time
-
-    # Check for emergency vehicles and prioritize the road if any is found
-    for road in roads:
-        if road.get_hasEmergencyVehicle():
-            # Only act (and report) if this road isn't already the one holding green
-            if active_road != road:
-                print(f"Emergency vehicle detected on {road.get_name()}, prioritizing this road.")
-                active_road.turn_red()
-                active_road = road
-                active_road.turn_green()
-                start_time = curr_time
-                print(f"Switched to road with emergency: {active_road.get_name()}")
-            break
-
-    # Update vehicle count every second
-    if curr_time - road_timestamp > 1:
-        print("\nUpdating vehicle counts:")
-        for road in roads:
-            road.update()
-            print(f"Road {road.get_name()} - Vehicle count: {road.get_vehicle_count()}")
-        road_timestamp = curr_time
-
-
-        
-        print(f"Active road: {active_road.get_name()}")
-        print(f"Time since last switch: {curr_time - start_time:.2f} seconds")
-        print(f"Road statuses:")
-        for road in roads:
-            print(f"  {road.get_name()} - Green: {road.is_green}, Emergency: {road.get_hasEmergencyVehicle()}")
-
-        print(f"\n----------------------------------------------")
-
-
-    # Camera updates every 10 seconds
-    if curr_time - camera_timestamp > 10:
-        print("\nUpdating camera data:")
-        for road in roads:
-            
-            # road.cam_update()
-            
-            print(f"Road {road.get_name()} - Camera updated.")
-        camera_timestamp = curr_time
-
-    # Brief pause so the loop doesn't spin the CPU at full speed
-    time.sleep(0.05)
+except KeyboardInterrupt:
+    print("\nStopped.")

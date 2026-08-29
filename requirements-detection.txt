@@ -1,0 +1,6 @@
+# Optional: YOLO camera detection (detection.py / Road.cam_update).
+# Kept separate from requirements.txt because these pull in PyTorch, which is
+# far too large for a free-tier deploy. Install locally with:
+#   pip install -r requirements-detection.txt
+ultralytics
+opencv-python

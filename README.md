@@ -21,12 +21,76 @@ Urban areas face significant traffic congestion, often resulting in delays for e
 ## 3. Tech Stack
 
 - **Programming Language:** Python
+- **Web Framework:** Flask, serving a live dashboard of the intersection
 - **Database:** SQLite for efficient data storage and retrieval
 - **Libraries:**
   - `ultralytics` for computer vision applications
   - `sqlite3` for database interactions
   - `numpy` for statistical adjustments in vehicle density calculations
   - Additional libraries like `time` for managing timing intervals
+
+## Running It
+
+Install the runtime dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+**Web dashboard** — a live view of all four roads, the active green light,
+and an event feed:
+
+```bash
+python3 app.py
+```
+
+Then open http://localhost:5000. Set `PORT` to use a different port.
+
+**Console runner** — the same simulation printing a status block each second:
+
+```bash
+python3 -u main.py
+```
+
+The `-u` matters: without it Python buffers the output and the terminal
+looks frozen.
+
+### Camera detection (optional)
+
+`detection.py` uses YOLO to count vehicles from video and is not needed for
+the simulation. It is imported lazily, so the project runs without it. To
+enable it, install the extra dependencies and call `Road.cam_update()`:
+
+```bash
+pip install -r requirements-detection.txt
+```
+
+## Deploying to Render
+
+The repository includes a `render.yaml` blueprint, so Render configures the
+service automatically:
+
+1. Push this repository to GitHub.
+2. In the Render dashboard, choose **New > Web Service** and select the repo.
+3. Render reads `render.yaml` and fills in the build and start commands.
+4. Deploy.
+
+Two things to know about the free tier: the service **spins down after about
+15 minutes of inactivity**, so the simulation restarts on the next visit, and
+the filesystem is **ephemeral**, so `road.db` is rebuilt on every deploy. Both
+are harmless here, since the database is recreated automatically at startup.
+
+The service must run with a **single worker**. Each additional worker would
+start its own copy of the simulation, and requests would then see whichever
+one happened to answer.
+
+### Known limitation
+
+Green roads currently clear `int(capacity / 3600)` vehicles per tick, which
+truncates to zero for the configured capacities. Vehicle counts therefore only
+grow, and green times grow with them the longer the process runs. On a
+long-lived deploy the phase lengths become unrealistically large. Fixing the
+clearance rate is the natural next step.
 
 ## 4. How It Works
 

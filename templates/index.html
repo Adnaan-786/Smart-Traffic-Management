@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Traffic Control</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #262d38;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #2ea043;
+    --green-glow: rgba(46, 160, 67, .45);
+    --red: #cf3c33;
+    --amber: #d99117;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 48px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+
+  header { margin-bottom: 24px; }
+  h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13.5px; }
+
+  .status {
+    display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline;
+    margin: 18px 0 24px; padding: 14px 18px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .status .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .status .value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(232px, 1fr)); gap: 14px; }
+
+  .road {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; transition: border-color .2s, box-shadow .2s;
+  }
+  .road.green { border-color: var(--green); box-shadow: 0 0 0 1px var(--green-glow), 0 0 22px -6px var(--green-glow); }
+  .road.emergency { border-color: var(--amber); box-shadow: 0 0 0 1px rgba(217,145,23,.4); }
+
+  .road-head { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+  .lamp { width: 12px; height: 12px; border-radius: 50%; background: var(--red); flex: none; }
+  .road.green .lamp { background: var(--green); box-shadow: 0 0 9px var(--green); }
+  .road-name { font-weight: 600; font-size: 15px; }
+  .badge {
+    margin-left: auto; font-size: 10.5px; font-weight: 700; letter-spacing: .07em;
+    padding: 3px 7px; border-radius: 4px; background: var(--amber); color: #1a1205;
+  }
+
+  .metric { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 7px; }
+  .metric .k { color: var(--muted); }
+  .metric .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+  .bar { height: 5px; background: #21262d; border-radius: 3px; overflow: hidden; margin-top: 11px; }
+  .bar span { display: block; height: 100%; background: var(--muted); transition: width .4s ease, background .3s; }
+  .road.green .bar span { background: var(--green); }
+  .road.emergency .bar span { background: var(--amber); }
+
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 30px 0 10px; }
+  .log {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 6px 0; max-height: 260px; overflow-y: auto;
+  }
+  .log p { margin: 0; padding: 7px 18px; font-size: 13.5px; display: flex; gap: 12px; }
+  .log p + p { border-top: 1px solid var(--border); }
+  .log time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .log .empty { color: var(--muted); }
+  .log p.emg { color: #f0b849; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Smart Traffic Control</h1>
+    <div class="sub">Adaptive signal timing with emergency vehicle prioritization</div>
+  </header>
+
+  <div class="status">
+    <div><div class="label">Green light</div><div class="value" id="active">&mdash;</div></div>
+    <div><div class="label">Phase elapsed</div><div class="value" id="elapsed">&mdash;</div></div>
+    <div><div class="label">Phase length</div><div class="value" id="phase">&mdash;</div></div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <h2>Event log</h2>
+  <div class="log" id="log"><p class="empty">Waiting for events&hellip;</p></div>
+</div>
+
+<script>
+const grid = document.getElementById('grid');
+const log = document.getElementById('log');
+
+function render(state) {
+  document.getElementById('active').textContent = state.active_road;
+  document.getElementById('elapsed').textContent = state.elapsed.toFixed(1) + 's';
+  document.getElementById('phase').textContent = state.green_time.toFixed(1) + 's';
+
+  grid.innerHTML = state.roads.map(r => {
+    const pct = Math.min(100, (r.vehicle_count / r.capacity) * 100);
+    const cls = 'road' + (r.is_green ? ' green' : '') + (r.emergency ? ' emergency' : '');
+    return `<div class="${cls}">
+      <div class="road-head">
+        <span class="lamp"></span>
+        <span class="road-name">${r.name}</span>
+        ${r.emergency ? '<span class="badge">EMERGENCY</span>' : ''}
+      </div>
+      <div class="metric"><span class="k">Vehicles</span><span class="v">${r.vehicle_count} / ${r.capacity}</span></div>
+      <div class="metric"><span class="k">Green time</span><span class="v">${r.green_time.toFixed(1)}s</span></div>
+      <div class="bar"><span style="width:${pct}%"></span></div>
+    </div>`;
+  }).join('');
+
+  if (state.events.length) {
+    log.innerHTML = state.events.map(e =>
+      `<p class="${/[Ee]mergency/.test(e.message) ? 'emg' : ''}"><time>${e.time}</time><span>${e.message}</span></p>`
+    ).join('');
+  }
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/api/state');
+    if (res.ok) render(await res.json());
+  } catch (err) { /* transient fetch failure, next tick retries */ }
+}
+
+poll();
+setInterval(poll, 400);
+</script>
+</body>
+</html>
