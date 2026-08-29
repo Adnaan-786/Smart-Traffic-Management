@@ -16,6 +16,7 @@ class Road:
         self.rate_of_increase = rate_of_increase  # Rate at which vehicle count increases when red
         self.is_green = False  # Current traffic light state
         self.emergency_triggered_at = None  # Timestamp for emergency vehicle trigger
+        self._fractional_vehicles = 0.0  # Carries sub-vehicle changes between updates
 
     def get_vehicle_count(self):
         """Returns the current vehicle count from the database."""
@@ -53,11 +54,21 @@ class Road:
         
         # Adjust vehicle count based on traffic light state
         if self.is_green:
-            # Decrease vehicle count if the light is green, simulating vehicle clearance
-            vehicle_count -= int(capacity / 3600 * (1 + np.random.uniform(-0.1, 0.1)))  # Randomized clearance rate
+            # Clear vehicles at the rate the green time formula already assumes:
+            # a queue at full capacity takes exactly total_time seconds to drain.
+            change = -capacity / total_time * (1 + np.random.uniform(-0.1, 0.1))  # Randomized clearance rate
         else:
             # Increase vehicle count if the light is red, simulating vehicle arrival
-            vehicle_count += int(self.rate_of_increase * (1 + np.random.uniform(-0.2, 0.2)))  # Randomized increase rate
+            change = self.rate_of_increase * (1 + np.random.uniform(-0.2, 0.2))  # Randomized increase rate
+
+        # Carry the leftover fraction into the next update rather than truncating
+        # it away, which used to round every clearance down to zero vehicles.
+        self._fractional_vehicles += change
+        whole_vehicles = int(self._fractional_vehicles)
+        self._fractional_vehicles -= whole_vehicles
+
+        # A queue cannot go negative or exceed what the road can hold
+        vehicle_count = max(0, min(vehicle_count + whole_vehicles, capacity))
         
         # Update the vehicle count in the database
         database.update_vehicle_count(self.id, vehicle_count)

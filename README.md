@@ -84,13 +84,29 @@ The service must run with a **single worker**. Each additional worker would
 start its own copy of the simulation, and requests would then see whichever
 one happened to answer.
 
-### Known limitation
+### Known limitation: demand exceeds capacity
 
-Green roads currently clear `int(capacity / 3600)` vehicles per tick, which
-truncates to zero for the configured capacities. Vehicle counts therefore only
-grow, and green times grow with them the longer the process runs. On a
-long-lived deploy the phase lengths become unrealistically large. Fixing the
-clearance rate is the natural next step.
+Green lights clear queues correctly, but the configured demand is more than
+the intersection can serve. A road's queue is stable when what arrives on red
+equals what clears on green, which means it needs a green fraction of
+`rate_of_increase / (rate_of_increase + capacity / total_time)`:
+
+| Road | Arrivals/s | Clears/s | Green needed |
+|------|-----------|----------|--------------|
+| Road 1 | 1.0 | 3.33 | 23.1% |
+| Road 2 | 2.0 | 2.67 | 42.9% |
+| Road 3 | 1.7 | 3.67 | 31.7% |
+| Road 4 | 1.2 | 2.33 | 34.0% |
+| | | | **131.6%** |
+
+Those fractions sum to more than one cycle, so demand exceeds capacity by
+roughly 24% and no signal timing can hold the queues steady. Individual roads
+drain visibly on green, but the totals drift upward over tens of minutes until
+they reach the capacity clamp.
+
+This is a property of the road parameters, not of the control logic. Lowering
+`rate_of_increase` in `simulation.py` until the green fractions sum to under
+100% makes the intersection stable indefinitely.
 
 ## 4. How It Works
 
