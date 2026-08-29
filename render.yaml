@@ -11,3 +11,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
+      # Camera detection needs PyTorch, which does not fit the free tier.
+      # A deployed instance runs the density simulation instead.
+      - key: FEEDS
+        value: "0"

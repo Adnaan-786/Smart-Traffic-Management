@@ -22,16 +22,40 @@ ROAD_SETTINGS = [
     ("Road 4", 30, 700, 300, 1.2),
 ]
 
+# Camera feed per road, used when the controller runs with use_video=True.
+# Capacities are far larger than any single camera frame can show, so in video
+# mode they are scaled down to the range a real detection can actually reach.
+FEED_PATHS = ["feeds/road-1.mp4", "feeds/road-2.mp4", "feeds/road-3.mp4", "feeds/road-4.mp4"]
+VIDEO_CAPACITY = 25    # Roughly the most vehicles one camera frame can hold
+VIDEO_TOTAL_TIME = 45  # A full frame of traffic earns a 45s green, not 300s
+
 MAX_EVENTS = 40  # Number of recent events kept for the dashboard feed
 
 
 class TrafficController:
     """Cycles green lights across a ring of roads, pre-empting for emergencies."""
 
-    def __init__(self):
+    def __init__(self, use_video=False):
         database.create_database()
 
+        self.use_video = use_video
         self.roads = [Road(*settings) for settings in ROAD_SETTINGS]
+
+        # In video mode the vehicle count is whatever the camera sees, which is
+        # a handful of vehicles rather than a road-sized queue. Rescale capacity
+        # so green times stay in a sensible range.
+        if use_video:
+            for road in self.roads:
+                database.update_capacity(road.id, VIDEO_CAPACITY)
+                database.update_total_time(road.id, VIDEO_TOTAL_TIME)
+
+        self.feeds = []
+        if use_video:
+            import detection
+            self.feeds = [
+                detection.VideoFeed(path, settings[0]).start()
+                for path, settings in zip(FEED_PATHS, ROAD_SETTINGS)
+            ]
         # Link the roads into a ring so each one knows its successor
         for current, following in zip(self.roads, self.roads[1:] + self.roads[:1]):
             current.next = following
@@ -43,6 +67,7 @@ class TrafficController:
 
         self.events = []
         self._prev_emergency = {road.id: False for road in self.roads}
+        self._feed_snapshots = [feed.snapshot() for feed in self.feeds]
         self._lock = threading.Lock()
         self._snapshot = {}
         self._refresh_snapshot()
@@ -97,8 +122,15 @@ class TrafficController:
 
         # Recalculate densities and green times once a second
         if curr_time - self.road_timestamp > 1:
-            for road in self.roads:
-                road.update()
+            for index, road in enumerate(self.roads):
+                if self.feeds:
+                    # One reading per road per tick, reused for both the signal
+                    # decision and the dashboard, so the two never disagree.
+                    reading = self.feeds[index].snapshot()
+                    self._feed_snapshots[index] = reading
+                    road.cam_update(reading["vehicle_count"])
+                else:
+                    road.update()
             self.road_timestamp = curr_time
 
         self._refresh_snapshot()
@@ -106,10 +138,12 @@ class TrafficController:
 
     def _refresh_snapshot(self):
         """Stores a plain-dict view of the current state for other threads to read."""
+        feeds = self._feed_snapshots
         state = {
             "active_road": self.active_road.get_name(),
             "elapsed": round(time.time() - self.start_time, 1),
             "green_time": round(self.active_road.get_green_time() or 0, 1),
+            "use_video": self.use_video,
             "roads": [
                 {
                     "name": road.get_name(),
@@ -118,8 +152,9 @@ class TrafficController:
                     "green_time": round(road.get_green_time() or 0, 1),
                     "is_green": road.is_green,
                     "emergency": bool(road.get_hasEmergencyVehicle()),
+                    "feed": feeds[index] if index < len(feeds) else None,
                 }
-                for road in self.roads
+                for index, road in enumerate(self.roads)
             ],
             "events": list(reversed(self.events)),
         }

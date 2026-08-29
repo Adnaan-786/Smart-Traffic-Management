@@ -2,14 +2,19 @@
 Console runner for the traffic controller.
 
 Prints a status block every second showing vehicle counts and light states.
-For the web dashboard, run app.py instead.
+For the web dashboard, and to actually watch the camera feeds, run app.py.
+
+Uses the built-in density simulation by default. Set FEEDS=1 to drive the
+counts from YOLO detection on the videos in feeds/ instead, which needs the
+extra dependencies in requirements-detection.txt.
 """
 
+import os
 import time
 
 import simulation
 
-controller = simulation.TrafficController()
+controller = simulation.TrafficController(use_video=os.environ.get("FEEDS") == "1")
 status_timestamp = time.time()
 
 try:

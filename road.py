@@ -2,6 +2,10 @@ import database
 import numpy as np
 import time
 
+# Shortest green a road can get, so a road with almost nothing on it still
+# holds the light long enough for waiting vehicles to actually move.
+MIN_GREEN_TIME = 5
+
 class Road:
     def __init__(self, name, vehicle_count, capacity, total_time, rate_of_increase, file_path=None):
         """
@@ -44,14 +48,13 @@ class Road:
 
     def update(self):
         """
-        Updates the road status including vehicle count and green light time.
-        Also manages random emergency vehicle triggers with a reset time.
+        Updates the road using the built-in density simulation: vehicles arrive
+        while the light is red and clear while it is green.
         """
-        # Retrieve current vehicle count, capacity, and total time from the database
         vehicle_count = database.get_vehicle_count(self.id)
         capacity = database.get_capacity(self.id)
         total_time = database.get_total_time(self.id)
-        
+
         # Adjust vehicle count based on traffic light state
         if self.is_green:
             # Clear vehicles at the rate the green time formula already assumes:
@@ -69,17 +72,39 @@ class Road:
 
         # A queue cannot go negative or exceed what the road can hold
         vehicle_count = max(0, min(vehicle_count + whole_vehicles, capacity))
-        
-        # Update the vehicle count in the database
-        database.update_vehicle_count(self.id, vehicle_count)
 
-        # Recalculate and update green time based on new vehicle count
-        green_time = vehicle_count / capacity * total_time
+        self._store_count(vehicle_count, capacity, total_time)
+        self._update_emergency()
+
+    def cam_update(self, detected_count):
+        """
+        Updates the road from a camera reading instead of the density
+        simulation. The vehicle count becomes what YOLO saw in that frame.
+        """
+        capacity = database.get_capacity(self.id)
+        total_time = database.get_total_time(self.id)
+
+        vehicle_count = max(0, min(detected_count, capacity))
+
+        self._store_count(vehicle_count, capacity, total_time)
+        self._update_emergency()
+
+    def _store_count(self, vehicle_count, capacity, total_time):
+        """Persists the vehicle count and the green time implied by it."""
+        database.update_vehicle_count(self.id, vehicle_count)
+        green_time = max(MIN_GREEN_TIME, vehicle_count / capacity * total_time)
         database.update_green_time(self.id, green_time)
 
+    def _update_emergency(self):
+        """
+        Randomly triggers an emergency vehicle and clears it after a few seconds.
+
+        This stays simulated because the bundled COCO model has no ambulance,
+        fire truck or police class, so emergency vehicles cannot be recognised
+        from the video feeds.
+        """
         # Trigger emergency vehicle randomly with a low probability and only if no emergency is active
         if np.random.rand() < 0.005 and self.emergency_triggered_at is None:  # 0.5% chance
-            print(f"Emergency vehicle triggered on {self.get_name()} for a few seconds.")
             database.update_hasEmergencyVehicle(self.id, True)
             self.emergency_triggered_at = time.time()  # Record emergency trigger time
 
@@ -87,20 +112,5 @@ class Road:
         if self.emergency_triggered_at:
             elapsed_time = time.time() - self.emergency_triggered_at
             if elapsed_time > 5:  # Clear emergency status after 5 seconds
-                print(f"Emergency vehicle cleared from {self.get_name()} after 5 seconds.")
                 database.update_hasEmergencyVehicle(self.id, False)
                 self.emergency_triggered_at = None  # Reset emergency trigger
-
-    def cam_update(self):
-        """
-        Updates the vehicle count and emergency status based on real-time camera detection.
-        Uses detection module to assess the current frame for vehicles and emergency vehicles.
-        """
-        # Imported here so the simulation can run without the heavy vision dependencies
-        import detection
-
-        # Get real-time data from camera detection for the specified road's file path
-        vehicle_count, hasEmergencyVehicle = detection.get_vehicle_condition(database.get_file_path(self.id))
-        
-        database.update_vehicle_count(self.id, vehicle_count)
-        database.update_hasEmergencyVehicle(self.id, hasEmergencyVehicle)

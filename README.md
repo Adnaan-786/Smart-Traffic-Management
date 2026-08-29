@@ -14,7 +14,7 @@ Urban areas face significant traffic congestion, often resulting in delays for e
 ## 2. Features
 
 - **Real-Time Traffic Control:** Dynamically adjusts traffic light timings based on real-time vehicle density at each intersection.
-- **Emergency Vehicle Detection and Prioritization:** Detects emergency vehicles on the road and grants them a green signal to pass through without delay.
+- **Emergency Vehicle Prioritization:** Grants a road with an emergency vehicle an immediate green signal, pre-empting the normal cycle. The detection itself is simulated; see [Emergency vehicles are simulated](#emergency-vehicles-are-simulated).
 - **Adaptive Timing Mechanism:** Uses the vehicle count and rate of increase on each road to calculate optimized green-light durations.
 - **Data Persistence with SQLite:** Efficiently stores and retrieves road traffic data for analysis of ongoing traffic patterns.
 
@@ -31,39 +31,59 @@ Urban areas face significant traffic congestion, often resulting in delays for e
 
 ## Running It
 
-Install the runtime dependencies:
+The dashboard shows the four camera feeds with YOLO detections drawn on them,
+and drives the signal timing from what it detects.
 
 ```bash
-pip install -r requirements.txt
-```
-
-**Web dashboard** — a live view of all four roads, the active green light,
-and an event feed:
-
-```bash
-python3 app.py
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-detection.txt
+.venv/bin/python app.py
 ```
 
 Then open http://localhost:5000. Set `PORT` to use a different port.
 
-**Console runner** — the same simulation printing a status block each second:
+The detection dependencies are large (PyTorch is roughly 1GB). To run without
+them, install only `requirements.txt` and set `FEEDS=0`, which falls back to
+the built-in density simulation and shows the cards without video:
+
+```bash
+FEEDS=0 python3 app.py
+```
+
+**Console runner** — the same controller printing a status block each second:
 
 ```bash
 python3 -u main.py
 ```
 
-The `-u` matters: without it Python buffers the output and the terminal
-looks frozen.
+The `-u` matters: without it Python buffers the output and the terminal looks
+frozen. `FEEDS=1` drives it from the cameras instead of the simulation.
 
-### Camera detection (optional)
+## How the detection works
 
-`detection.py` uses YOLO to count vehicles from video and is not needed for
-the simulation. It is imported lazily, so the project runs without it. To
-enable it, install the extra dependencies and call `Road.cam_update()`:
+Each road has a camera feed in `feeds/`, listed in `feeds/CREDITS.md`. For
+every feed, `detection.py` runs a background thread that decodes frames, runs
+`yolo11n` over them at 8 fps, and keeps both the annotated JPEG and the current
+vehicle count. The dashboard streams the annotated frames as MJPEG from
+`/feed/<n>` and reads the counts from `/api/state`.
 
-```bash
-pip install -r requirements-detection.txt
-```
+Detected vehicles are the COCO classes `bicycle`, `car`, `motorcycle`, `bus`
+and `truck`. A road's green time is recalculated once a second from the count
+its camera currently sees, so a busier approach earns a longer green.
+
+Each feed gets its own model instance. Ultralytics keeps per-call state on a
+shared predictor and fuses the model in place on first use, so driving one
+model from several threads crashes.
+
+### Emergency vehicles are simulated
+
+The bundled `yolo11n.pt` is COCO-trained, and COCO has no ambulance, fire
+truck or police class, so emergency vehicles cannot be recognised from these
+feeds. The original code searched for `"cops"`, `"ambulance"` and
+`"fire truck"`, none of which the model can ever return. Emergency events
+therefore stay on the original random trigger and are labelled as simulated
+in the dashboard. Genuine detection would need a model trained on those
+classes.
 
 ## Deploying to Render
 
@@ -74,6 +94,10 @@ service automatically:
 2. In the Render dashboard, choose **New > Web Service** and select the repo.
 3. Render reads `render.yaml` and fills in the build and start commands.
 4. Deploy.
+
+A deployed instance runs with `FEEDS=0` and shows no video. Camera detection
+needs PyTorch, which does not fit in the free tier's 512MB, so the feeds are a
+local-only feature.
 
 Two things to know about the free tier: the service **spins down after about
 15 minutes of inactivity**, so the simulation restarts on the next visit, and
@@ -121,7 +145,13 @@ The database includes a table for each road, containing fields like:
 - **Process Loop:** Monitors vehicle counts, calculates optimized green times, and switches active roads to ensure optimal traffic flow.
   
 ### Emergency Vehicle Handling
-The system continuously checks for emergency vehicles using YOLO-based detection. When an emergency vehicle is detected, the traffic light state updates to provide immediate green light access to that vehicle.
+The controller continuously checks each road for an emergency vehicle. When one
+appears, the light state updates immediately to give that road green, cutting
+the current phase short.
+
+The presence flag itself is simulated rather than detected: the bundled
+COCO-trained model has no ambulance, fire truck or police class. See
+[Emergency vehicles are simulated](#emergency-vehicles-are-simulated).
 
 ## 5. Challenges and Solutions
 

@@ -85,6 +85,28 @@ def update_vehicle_count(road_id: int, vehicle_count: int):
     """, (vehicle_count, road_id))
     close_connection(con, cur)
 
+def update_capacity(road_id: int, capacity: int):
+    """Updates the vehicle capacity for a specific road by id."""
+    con, cur = get_connection()
+    # Update 'capacity' column for the specified road id
+    cur.execute("""
+        UPDATE road 
+        SET capacity = ? 
+        WHERE id = ?
+    """, (capacity, road_id))
+    close_connection(con, cur)
+
+def update_total_time(road_id: int, total_time: int):
+    """Updates the cycle time budget for a specific road by id."""
+    con, cur = get_connection()
+    # Update 'total_time' column for the specified road id
+    cur.execute("""
+        UPDATE road 
+        SET total_time = ? 
+        WHERE id = ?
+    """, (total_time, road_id))
+    close_connection(con, cur)
+
 def update_file_path(road_id: int, file_path: str):
     """Updates the file path for the traffic data source of a specific road by id."""
     con, cur = get_connection()
