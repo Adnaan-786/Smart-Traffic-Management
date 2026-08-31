@@ -147,11 +147,9 @@
   <div class="note" id="note" hidden>
     <strong>Emergency events are simulated.</strong>
     Vehicle counts come from real YOLO detection on the feeds above, but the
-    bundled <code>yolo11n.pt</code> is COCO-trained and has no ambulance, fire
-    truck or police class. A second detector can be plugged in by setting
-    <code>EMERGENCY_MODEL</code>; until then these events use the original
-    random trigger. See the README for why no public model tested was
-    reliable enough to enable by default.
+    emergency detector is not running, so these events use the original random
+    trigger. Set <code>EMERGENCY_MODEL</code> to a weights file to detect
+    ambulances, fire trucks and police in the feeds instead.
   </div>
   <div class="note" id="watcher-note" hidden></div>
 </div>
@@ -214,8 +212,16 @@ function render(state) {
     document.getElementById('gt-' + i).textContent = r.green_time.toFixed(1) + 's';
     document.getElementById('bar-' + i).style.width =
       Math.min(100, (r.vehicle_count / r.capacity) * 100) + '%';
-    document.getElementById('badge-' + i).innerHTML =
-      r.emergency ? '<span class="badge">EMERGENCY (SIM)</span>' : '';
+    // Say what it actually is: a real detection names the class and its
+    // confidence, a simulated one is marked as such so the two never blur.
+    let badge = '';
+    if (r.emergency) {
+      const f = r.feed;
+      badge = (watching && f && f.emergency_label)
+        ? `<span class="badge">${f.emergency_label.replace('_', ' ').toUpperCase()} ${f.emergency_conf}</span>`
+        : '<span class="badge">EMERGENCY (SIM)</span>';
+    }
+    document.getElementById('badge-' + i).innerHTML = badge;
 
     const cls = r.feed ? Object.entries(r.feed.class_counts) : [];
     document.getElementById('cls-' + i).textContent =

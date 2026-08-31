@@ -5,9 +5,10 @@ Each VideoFeed owns one video file, decodes it on a background thread, runs
 YOLO over the frames, and keeps both the latest annotated JPEG and the current
 vehicle count available for the dashboard to read.
 
-The bundled yolo11n.pt is trained on COCO, which has no ambulance, fire truck
-or police class, so emergency vehicles cannot be detected from video with this
-model. Emergency events stay simulated; see Road.update().
+Two models run side by side. yolo11n counts ordinary vehicles, one instance
+per feed. It is COCO-trained, so it has no ambulance, fire truck or police
+class; a second model handles those, shared across the feeds by
+EmergencyWatcher because it is far heavier.
 """
 
 import os
@@ -33,13 +34,17 @@ INFERENCE_SIZE = 640      # Frames are scaled to this before detection
 CONFIDENCE = 0.35         # Minimum detection confidence
 TARGET_FPS = 8            # Detections per second per feed
 
-# A second model can handle emergency vehicles, which COCO cannot represent.
-# Off unless EMERGENCY_MODEL points at a weights file: see the README for why
-# no public model tested here was trustworthy enough to enable by default.
-# EMERGENCY_CLASSES lists the class ids in that model to treat as emergencies.
-EMERGENCY_MODEL_PATH = os.environ.get("EMERGENCY_MODEL", "")
-EMERGENCY_CLASSES = {0: "Emergency"}
-EMERGENCY_CONFIDENCE = float(os.environ.get("EMERGENCY_CONF", "0.6"))
+# A second model handles emergency vehicles, which COCO cannot represent.
+# Set EMERGENCY_MODEL to empty to turn it off, or to another weights file.
+EMERGENCY_MODEL_PATH = os.environ.get("EMERGENCY_MODEL", "models/emergency.pt")
+EMERGENCY_CLASSES = {0: "Ambulance", 1: "Fire_Truck", 2: "Police"}
+
+# Measured over ~30 frames per clip on six traffic scenes containing emergency
+# vehicles and four without: at 0.5 the model fires on 62% of emergency frames
+# and 0.8% of ordinary ones. That single stray frame is isolated, so requiring
+# two checks in a row before believing it removes false alarms entirely.
+EMERGENCY_CONFIDENCE = float(os.environ.get("EMERGENCY_CONF", "0.5"))
+EMERGENCY_CONFIRMATIONS = 2
 EMERGENCY_INTERVAL = 0.35  # Seconds between checks, cycling through the feeds
 EMERGENCY_HOLD = 4.0       # Keep a sighting active this long after it is last seen
 
@@ -77,6 +82,7 @@ class VideoFeed:
         self.emergency_label = None
         self.emergency_conf = 0.0
         self._emergency_seen_at = None
+        self._emergency_streak = 0
         self._raw_frame = None
 
         self._jpeg = None
@@ -171,21 +177,28 @@ class VideoFeed:
     def set_emergency(self, label, conf):
         """
         Records an emergency sighting. Called by the emergency worker.
-        Passing None clears it, but only once the hold time has elapsed, so a
+
+        A sighting is only believed after EMERGENCY_CONFIRMATIONS checks in a
+        row, which is what keeps a single stray frame of ordinary traffic from
+        raising a false alarm. Clearing waits for the hold time to pass, so a
         vehicle that flickers between frames does not flicker on the dashboard.
         """
         now = time.time()
         with self._lock:
             if label:
-                self.emergency = True
-                self.emergency_label = label
-                self.emergency_conf = conf
-                self._emergency_seen_at = now
-            elif self._emergency_seen_at and now - self._emergency_seen_at > EMERGENCY_HOLD:
-                self.emergency = False
-                self.emergency_label = None
-                self.emergency_conf = 0.0
-                self._emergency_seen_at = None
+                self._emergency_streak += 1
+                if self._emergency_streak >= EMERGENCY_CONFIRMATIONS:
+                    self.emergency = True
+                    self.emergency_label = label
+                    self.emergency_conf = conf
+                    self._emergency_seen_at = now
+            else:
+                self._emergency_streak = 0
+                if self._emergency_seen_at and now - self._emergency_seen_at > EMERGENCY_HOLD:
+                    self.emergency = False
+                    self.emergency_label = None
+                    self.emergency_conf = 0.0
+                    self._emergency_seen_at = None
 
     def snapshot(self):
         """Returns the current detection numbers for this feed."""

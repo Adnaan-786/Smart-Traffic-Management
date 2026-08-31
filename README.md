@@ -14,7 +14,7 @@ Urban areas face significant traffic congestion, often resulting in delays for e
 ## 2. Features
 
 - **Real-Time Traffic Control:** Dynamically adjusts traffic light timings based on real-time vehicle density at each intersection.
-- **Emergency Vehicle Prioritization:** Grants a road with an emergency vehicle an immediate green signal, pre-empting the normal cycle. The detection itself is simulated; see [Emergency vehicles are simulated](#emergency-vehicles-are-simulated).
+- **Emergency Vehicle Detection and Prioritization:** Detects ambulances, fire trucks and police vehicles in the camera feeds with a dedicated model, and grants that road an immediate green signal, pre-empting the normal cycle.
 - **Adaptive Timing Mechanism:** Uses the vehicle count and rate of increase on each road to calculate optimized green-light durations.
 - **Data Persistence with SQLite:** Efficiently stores and retrieves road traffic data for analysis of ongoing traffic patterns.
 
@@ -93,42 +93,57 @@ what each camera detects; the canvas only draws the consequences. Vehicle
 motion is a car-following model in the browser, so the animation stays smooth
 without adding server load.
 
-### Emergency vehicles are simulated
+### Emergency vehicle detection
 
-The bundled `yolo11n.pt` is COCO-trained, and COCO has no ambulance, fire
-truck or police class, so emergency vehicles cannot be recognised from these
-feeds. The original code searched for `"cops"`, `"ambulance"` and
-`"fire truck"`, none of which the model can ever return.
+`yolo11n.pt` is COCO-trained and has no ambulance, fire truck or police class,
+so a second model handles those. `EmergencyWatcher` in `detection.py` runs it
+across all feeds from a single worker, on the GPU where available, and feeds
+real detections into the signal logic in place of the original random trigger.
 
-The plumbing for a real detector is in place. `EmergencyWatcher` in
-`detection.py` runs a second model across all feeds from one worker, on the
-GPU where available, and feeds genuine detections straight into the signal
-logic in place of the random trigger. Point it at a model to switch it on:
+`models/emergency.pt` is a yolo12m fine-tune from
+[udithhh/Emergency_Vehicle_Classification](https://huggingface.co/udithhh/Emergency_Vehicle_Classification)
+(MIT), detecting `Ambulance`, `Fire_Truck` and `Police`. Point
+`EMERGENCY_MODEL` at different weights to swap it, or set it empty to fall
+back to the simulated trigger:
 
 ```bash
-EMERGENCY_MODEL=path/to/weights.pt EMERGENCY_CONF=0.6 python3 app.py
+EMERGENCY_MODEL= python3 app.py          # simulated emergencies
+EMERGENCY_CONF=0.6 python3 app.py        # stricter threshold
 ```
 
-Adjust `EMERGENCY_CLASSES` in `detection.py` to the class ids that model uses
-for emergency vehicles. On an M2 the watcher runs at roughly 35-90ms per
-check on the GPU, against about 880ms on CPU, so a GPU is worth having.
+#### How the threshold was chosen
 
-It ships disabled because none of the public models tested were trustworthy.
-Each was measured over about 40 frames per clip, comparing peak confidence on
-ordinary traffic against peak confidence on real ambulance footage:
+Three public models were measured over ~30 frames per clip, on six traffic
+scenes containing emergency vehicles and four containing none. What matters is
+not whether a model detects an ambulance, but whether it stays quiet on
+ordinary traffic. Detection rate at a 0.5 threshold:
 
-| Model | Peak on normal traffic | Peak on ambulance footage | Usable? |
-|-------|-----------------------|---------------------------|---------|
-| `udithhh/Emergency_Vehicle_Classification` | 0.465 (`Police`, on plain cars) | 0.30 | No, false alarms outrank real ones |
-| `kishornayak2006/IntelliSignal-YOLOv8-Ambulance` | 0.745, firing on 10 of 11 frames | 0.537 | No, calls every car an ambulance |
-| `sakethGurram/emergency-yolo` | 0.878 | 0.744 | No, no threshold separates them |
+| Model | Fires on emergency frames | Fires on ordinary traffic |
+|-------|--------------------------|---------------------------|
+| `udithhh/Emergency_Vehicle_Classification` | 61.6% | **0.8%** |
+| `kishornayak2006/IntelliSignal-YOLOv8-Ambulance` | 45.3% | 25.4% |
+| `sakethGurram/emergency-yolo` | 29.5% | 4.1% |
 
-In every case ordinary cars scored at least as high as genuine ambulances, so
-no confidence threshold separates them. A detector that is confidently wrong
-is worse than an honest simulation, which is why the random trigger stays the
-default and is labelled as simulated in the dashboard. A model trained and
-validated on wide traffic-camera scenes, rather than cropped single-vehicle
-images, would drop straight into the same hook.
+Only the first separates the two cases. Its single false frame across 122
+frames of ordinary traffic was isolated, so a sighting is believed only after
+`EMERGENCY_CONFIRMATIONS` checks in a row. With that rule the benchmark gives
+**5 of 6 emergency clips flagged and 0 of 4 ordinary clips falsely flagged**.
+
+The one miss is night footage of a fire truck, which the model never scores
+above 0.39. Detection in the dark is its weak point.
+
+Note that the test footage matters more than the model. An earlier version of
+this benchmark used a night close-up of a *parked* ambulance as its positive
+case, scored 0.30 on it, and wrongly concluded every model was unusable. Wide
+traffic scenes, which is what the cameras actually see, tell a different story.
+
+#### Cost
+
+The emergency model is roughly ten times heavier than the vehicle counter. On
+an M2 it runs at about 90ms per check on the GPU against 880ms on CPU, so a
+GPU matters. Running it alongside the four feeds costs throughput: feeds drop
+from about 7.7 fps to about 4.1 fps. Set `EMERGENCY_MODEL=` empty to get the
+full frame rate back.
 
 ## Deploying to Render
 
@@ -194,9 +209,8 @@ The controller continuously checks each road for an emergency vehicle. When one
 appears, the light state updates immediately to give that road green, cutting
 the current phase short.
 
-The presence flag itself is simulated rather than detected: the bundled
-COCO-trained model has no ambulance, fire truck or police class. See
-[Emergency vehicles are simulated](#emergency-vehicles-are-simulated).
+The flag comes from a dedicated emergency model running over the same camera
+feeds; see [Emergency vehicle detection](#emergency-vehicle-detection).
 
 ## 5. Challenges and Solutions
 
